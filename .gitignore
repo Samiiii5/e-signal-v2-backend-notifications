@@ -1,0 +1,32 @@
+# Environnements virtuels
+venv/
+.venv/
+env/
+
+# Cache Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Fichiers sensibles — NE JAMAIS PUSHER
+firebase-credentials.json
+fcm_tokens.json
+.env
+
+# Logs
+*.log
+
+# Fichiers système
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Distribution Python
+dist/
+build/
+*.egg-info/
