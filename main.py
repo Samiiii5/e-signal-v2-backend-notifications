@@ -10,7 +10,17 @@ import json
 load_dotenv()
 
 # Initialiser Firebase
-cred = credentials.Certificate(os.getenv("FIREBASE_CREDENTIALS_PATH"))
+firebase_creds_json = os.getenv("FIREBASE_CREDENTIALS_JSON")
+firebase_creds_path = os.getenv("FIREBASE_CREDENTIALS_PATH")
+
+if firebase_creds_json:
+    cred = credentials.Certificate(json.loads(firebase_creds_json))
+elif firebase_creds_path:
+    cred = credentials.Certificate(firebase_creds_path)
+else:
+    raise ValueError("Aucune credential Firebase trouvée. "
+                     "Définir FIREBASE_CREDENTIALS_JSON ou FIREBASE_CREDENTIALS_PATH.")
+
 firebase_admin.initialize_app(cred)
 
 app = FastAPI(title="e-Signal Notifications API")
@@ -64,11 +74,11 @@ async def register_token(request: FCMTokenRequest):
 async def send_notification(request: NotificationRequest):
     try:
         tokens = load_tokens()
-        
+
         # Filtrer les tokens par organization_id
         org_tokens = [
-            v["fcm_token"] 
-            for v in tokens.values() 
+            v["fcm_token"]
+            for v in tokens.values()
             if v["organization_id"] == request.organization_id
         ]
 
