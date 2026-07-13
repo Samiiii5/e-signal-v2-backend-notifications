@@ -79,7 +79,6 @@ async def send_notification(
     token: str = Depends(verify_token)
 ):
     try:
-        # Récupérer le token FCM depuis Firestore
         doc = db.collection("fcmTokens").document(request.user_id).get()
 
         if not doc.exists:
@@ -90,7 +89,6 @@ async def send_notification(
 
         fcm_token = doc.to_dict()["token"]
 
-        # Envoyer la notification via Firebase
         message = messaging.Message(
             notification=messaging.Notification(
                 title=request.title,
@@ -101,7 +99,6 @@ async def send_notification(
         )
         response = messaging.send(message)
 
-        # Sauvegarder dans l'historique Firestore
         db.collection("users").document(request.user_id)\
           .collection("notifications").add({
             "title": request.title,
@@ -120,7 +117,37 @@ async def send_notification(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Endpoint 3 — Santé du serveur
+# Endpoint 3 — Historique des notifications d'un utilisateur
+@app.get("/api/notifications/history/{user_id}")
+async def get_notification_history(
+    user_id: str,
+    token: str = Depends(verify_token)
+):
+    try:
+        notifications_ref = db.collection("users").document(user_id)\
+            .collection("notifications")\
+            .order_by("sent_at", direction=firestore.Query.DESCENDING)\
+            .limit(50)
+
+        docs = notifications_ref.stream()
+
+        history = []
+        for doc in docs:
+            data = doc.to_dict()
+            data["id"] = doc.id
+            history.append(data)
+
+        return {
+            "status": "success",
+            "user_id": user_id,
+            "count": len(history),
+            "notifications": history
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Endpoint 4 — Santé du serveur
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "e-Signal Notifications"}
