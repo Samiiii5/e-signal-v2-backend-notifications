@@ -1,10 +1,11 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from pydantic import BaseModel
 import firebase_admin
-from firebase_admin import credentials, messaging
+from firebase_admin import credentials, messaging, firestore
 from dotenv import load_dotenv
 import os
 import json
+from datetime import datetime, timezone
 
 # Charger les variables d'environnement
 load_dotenv()
@@ -18,36 +19,39 @@ if firebase_creds_json:
 elif firebase_creds_path:
     cred = credentials.Certificate(firebase_creds_path)
 else:
-    raise ValueError("Aucune credential Firebase trouvée. "
-                     "Définir FIREBASE_CREDENTIALS_JSON ou FIREBASE_CREDENTIALS_PATH.")
+    raise ValueError("Aucune credential Firebase trouvée.")
 
 firebase_admin.initialize_app(cred)
 
+# Initialiser Firestore
+db = firestore.client()
+
+# Clé secrète pour le webhook
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET_KEY")
+
 app = FastAPI(title="e-Signal Notifications API")
 
-# Fichier de stockage des tokens
-TOKENS_FILE = "fcm_tokens.json"
 
-def load_tokens():
-    if os.path.exists(TOKENS_FILE):
-        with open(TOKENS_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-def save_tokens(tokens):
-    with open(TOKENS_FILE, "w") as f:
-        json.dump(tokens, f, indent=2)
+# Vérification du Bearer Token
+def verify_token(authorization: str = Header(...)):
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Format Bearer Token invalide")
+    token = authorization.replace("Bearer ", "")
+    if token != WEBHOOK_SECRET:
+        raise HTTPException(status_code=401, detail="Token invalide")
+    return token
 
 
 # Modèles
 class FCMTokenRequest(BaseModel):
     user_id: str
     fcm_token: str
+    platform: str = "android"
     organization_id: str
 
 
-class NotificationRequest(BaseModel):
-    organization_id: str
+class WebhookRequest(BaseModel):
+    user_id: str
     title: str
     body: str
     data: dict = {}
@@ -57,51 +61,60 @@ class NotificationRequest(BaseModel):
 @app.post("/api/notifications/register-token")
 async def register_token(request: FCMTokenRequest):
     try:
-        tokens = load_tokens()
-        tokens[request.user_id] = {
-            "user_id": request.user_id,
-            "fcm_token": request.fcm_token,
+        db.collection("fcmTokens").document(request.user_id).set({
+            "token": request.fcm_token,
+            "platform": request.platform,
             "organization_id": request.organization_id,
-        }
-        save_tokens(tokens)
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
         return {"status": "success", "message": "Token enregistré avec succès"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Endpoint 2 — Envoyer une notification à une organisation
-@app.post("/api/notifications/send")
-async def send_notification(request: NotificationRequest):
+# Endpoint 2 — Webhook sécurisé pour envoyer une notification
+@app.post("/api/webhooks/send")
+async def send_notification(
+    request: WebhookRequest,
+    token: str = Depends(verify_token)
+):
     try:
-        tokens = load_tokens()
+        # Récupérer le token FCM depuis Firestore
+        doc = db.collection("fcmTokens").document(request.user_id).get()
 
-        # Filtrer les tokens par organization_id
-        org_tokens = [
-            v["fcm_token"]
-            for v in tokens.values()
-            if v["organization_id"] == request.organization_id
-        ]
-
-        if not org_tokens:
+        if not doc.exists:
             raise HTTPException(
                 status_code=404,
-                detail="Aucun token trouvé pour cette organisation"
+                detail="Token FCM non trouvé pour cet utilisateur"
             )
 
-        # Envoyer la notification
-        message = messaging.MulticastMessage(
+        fcm_token = doc.to_dict()["token"]
+
+        # Envoyer la notification via Firebase
+        message = messaging.Message(
             notification=messaging.Notification(
                 title=request.title,
                 body=request.body,
             ),
             data=request.data,
-            tokens=org_tokens,
+            token=fcm_token,
         )
-        response = messaging.send_each_for_multicast(message)
+        response = messaging.send(message)
+
+        # Sauvegarder dans l'historique Firestore
+        db.collection("users").document(request.user_id)\
+          .collection("notifications").add({
+            "title": request.title,
+            "body": request.body,
+            "data": request.data,
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+            "status": "sent",
+            "message_id": response,
+        })
+
         return {
             "status": "success",
-            "sent": response.success_count,
-            "failed": response.failure_count,
+            "message_id": response,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
