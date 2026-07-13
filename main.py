@@ -26,20 +26,17 @@ firebase_admin.initialize_app(cred)
 # Initialiser Firestore
 db = firestore.client()
 
-# Clé secrète pour le webhook
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET_KEY")
+# API Key secrète
+API_KEY = os.getenv("API_KEY")
 
 app = FastAPI(title="e-Signal Notifications API")
 
 
-# Vérification du Bearer Token
-def verify_token(authorization: str = Header(...)):
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Format Bearer Token invalide")
-    token = authorization.replace("Bearer ", "")
-    if token != WEBHOOK_SECRET:
-        raise HTTPException(status_code=401, detail="Token invalide")
-    return token
+# Vérification de l'API Key
+def verify_api_key(x_api_key: str = Header(...)):
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="API Key invalide")
+    return x_api_key
 
 
 # Modèles
@@ -51,7 +48,7 @@ class FCMTokenRequest(BaseModel):
 
 
 class WebhookRequest(BaseModel):
-    user_id: str
+    organization_id: str
     title: str
     body: str
     data: dict = {}
@@ -76,42 +73,54 @@ async def register_token(request: FCMTokenRequest):
 @app.post("/api/webhooks/send")
 async def send_notification(
     request: WebhookRequest,
-    token: str = Depends(verify_token)
+    api_key: str = Depends(verify_api_key)
 ):
     try:
-        doc = db.collection("fcmTokens").document(request.user_id).get()
+        # Récupérer tous les tokens FCM de l'organisation depuis Firestore
+        tokens_ref = db.collection("fcmTokens")\
+            .where("organization_id", "==", request.organization_id)\
+            .stream()
 
-        if not doc.exists:
+        fcm_tokens = []
+        user_ids = []
+        for doc in tokens_ref:
+            data = doc.to_dict()
+            fcm_tokens.append(data["token"])
+            user_ids.append(doc.id)
+
+        if not fcm_tokens:
             raise HTTPException(
                 status_code=404,
-                detail="Token FCM non trouvé pour cet utilisateur"
+                detail="Aucun token FCM trouvé pour cette organisation"
             )
 
-        fcm_token = doc.to_dict()["token"]
-
-        message = messaging.Message(
+        # Envoyer la notification via Firebase (multicast)
+        message = messaging.MulticastMessage(
             notification=messaging.Notification(
                 title=request.title,
                 body=request.body,
             ),
             data=request.data,
-            token=fcm_token,
+            tokens=fcm_tokens,
         )
-        response = messaging.send(message)
+        response = messaging.send_each_for_multicast(message)
 
-        db.collection("users").document(request.user_id)\
-          .collection("notifications").add({
-            "title": request.title,
-            "body": request.body,
-            "data": request.data,
-            "sent_at": datetime.now(timezone.utc).isoformat(),
-            "status": "sent",
-            "message_id": response,
-        })
+        # Sauvegarder dans l'historique pour chaque utilisateur
+        for user_id in user_ids:
+            db.collection("users").document(user_id)\
+              .collection("notifications").add({
+                "title": request.title,
+                "body": request.body,
+                "data": request.data,
+                "sent_at": datetime.now(timezone.utc).isoformat(),
+                "status": "sent",
+                "organization_id": request.organization_id,
+            })
 
         return {
             "status": "success",
-            "message_id": response,
+            "sent": response.success_count,
+            "failed": response.failure_count,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -121,7 +130,7 @@ async def send_notification(
 @app.get("/api/notifications/history/{user_id}")
 async def get_notification_history(
     user_id: str,
-    token: str = Depends(verify_token)
+    api_key: str = Depends(verify_api_key)
 ):
     try:
         notifications_ref = db.collection("users").document(user_id)\
