@@ -11,6 +11,16 @@ from datetime import datetime, timezone
 # Charger les variables d'environnement
 load_dotenv()
 
+firebase_web_config = {
+    "apiKey": os.getenv("FIREBASE_API_KEY"),
+    "authDomain": os.getenv("FIREBASE_AUTH_DOMAIN"),
+    "projectId": os.getenv("FIREBASE_PROJECT_ID"),
+    "storageBucket": os.getenv("FIREBASE_STORAGE_BUCKET"),
+    "messagingSenderId": os.getenv("FIREBASE_MESSAGING_SENDER_ID"),
+    "appId": os.getenv("FIREBASE_APP_ID"),
+    "vapidKey": os.getenv("FIREBASE_VAPID_KEY"),
+}
+
 # Initialiser Firebase
 firebase_creds_json = os.getenv("FIREBASE_CREDENTIALS_JSON")
 firebase_creds_path = os.getenv("FIREBASE_CREDENTIALS_PATH")
@@ -22,7 +32,7 @@ elif firebase_creds_path:
 else:
     raise ValueError("Aucune credential Firebase trouvée.")
 
-firebase_admin.initialize_app(cred)
+firebase_admin.initialize_app(cred)  # ← CORRIGÉ
 
 # Initialiser Firestore
 db = firestore.client()
@@ -101,7 +111,6 @@ async def send_notification(
             )
             messaging.send(message)
 
-            # Sauvegarder dans l'historique de cet utilisateur
             db.collection("users").document(request.user_id)\
               .collection("notifications").add({
                 "title": request.title,
@@ -146,7 +155,6 @@ async def send_notification(
         )
         response = messaging.send_each_for_multicast(message)
 
-        # Sauvegarder dans l'historique de chaque utilisateur
         for user_id in user_ids:
             db.collection("users").document(user_id)\
               .collection("notifications").add({
@@ -202,3 +210,11 @@ async def get_notification_history(
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "e-Signal Notifications"}
+
+
+# Endpoint 5 — Configuration Firebase pour l'app web
+@app.get("/api/config/firebase")
+async def get_firebase_config(
+    api_key: str = Depends(verify_api_key)
+):
+    return firebase_web_config
