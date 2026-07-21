@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends, Header
 from pydantic import BaseModel
+from typing import Optional
 import firebase_admin
 from firebase_admin import credentials, messaging, firestore
 from dotenv import load_dotenv
@@ -52,6 +53,7 @@ class WebhookRequest(BaseModel):
     title: str
     body: str
     data: dict = {}
+    user_id: Optional[str] = None
 
 
 # Endpoint 1 — Enregistrer le FCM token
@@ -76,7 +78,47 @@ async def send_notification(
     api_key: str = Depends(verify_api_key)
 ):
     try:
-        # Récupérer tous les tokens FCM de l'organisation depuis Firestore
+        # CAS 1 — user_id fourni → notifier un seul utilisateur
+        if request.user_id:
+            token_doc = db.collection("fcmTokens")\
+                .document(request.user_id).get()
+
+            if not token_doc.exists:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Aucun token FCM trouvé pour cet utilisateur"
+                )
+
+            fcm_token = token_doc.to_dict()["token"]
+
+            message = messaging.Message(
+                notification=messaging.Notification(
+                    title=request.title,
+                    body=request.body,
+                ),
+                data=request.data,
+                token=fcm_token,
+            )
+            messaging.send(message)
+
+            # Sauvegarder dans l'historique de cet utilisateur
+            db.collection("users").document(request.user_id)\
+              .collection("notifications").add({
+                "title": request.title,
+                "body": request.body,
+                "data": request.data,
+                "sent_at": datetime.now(timezone.utc).isoformat(),
+                "status": "sent",
+                "organization_id": request.organization_id,
+            })
+
+            return {
+                "status": "success",
+                "sent": 1,
+                "failed": 0,
+            }
+
+        # CAS 2 — pas de user_id → notifier toute l'organisation
         tokens_ref = db.collection("fcmTokens")\
             .where("organization_id", "==", request.organization_id)\
             .stream()
@@ -94,7 +136,6 @@ async def send_notification(
                 detail="Aucun token FCM trouvé pour cette organisation"
             )
 
-        # Envoyer la notification via Firebase (multicast)
         message = messaging.MulticastMessage(
             notification=messaging.Notification(
                 title=request.title,
@@ -105,7 +146,7 @@ async def send_notification(
         )
         response = messaging.send_each_for_multicast(message)
 
-        # Sauvegarder dans l'historique pour chaque utilisateur
+        # Sauvegarder dans l'historique de chaque utilisateur
         for user_id in user_ids:
             db.collection("users").document(user_id)\
               .collection("notifications").add({
@@ -122,6 +163,7 @@ async def send_notification(
             "sent": response.success_count,
             "failed": response.failure_count,
         }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
